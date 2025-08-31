@@ -11,6 +11,7 @@
 
 namespace Symfony\AI\AiBundle;
 
+use Google\Auth\ApplicationDefaultCredentials;
 use Symfony\AI\Agent\Agent;
 use Symfony\AI\Agent\AgentInterface;
 use Symfony\AI\Agent\InputProcessor\SystemPromptInputProcessor;
@@ -35,6 +36,9 @@ use Symfony\AI\Platform\Bridge\Mistral\PlatformFactory as MistralPlatformFactory
 use Symfony\AI\Platform\Bridge\Ollama\PlatformFactory as OllamaPlatformFactory;
 use Symfony\AI\Platform\Bridge\OpenAi\PlatformFactory as OpenAiPlatformFactory;
 use Symfony\AI\Platform\Bridge\OpenRouter\PlatformFactory as OpenRouterPlatformFactory;
+use Symfony\AI\Platform\Bridge\VertexAi\PlatformFactory as VertexAiPlatformFactory;
+use Symfony\AI\Platform\Bridge\Voyage\PlatformFactory as VoyagePlatformFactory;
+use Symfony\AI\Platform\Exception\RuntimeException;
 use Symfony\AI\Platform\Model;
 use Symfony\AI\Platform\ModelClientInterface;
 use Symfony\AI\Platform\Platform;
@@ -66,6 +70,7 @@ use Symfony\Component\DependencyInjection\ContainerInterface;
 use Symfony\Component\DependencyInjection\Definition;
 use Symfony\Component\DependencyInjection\Loader\Configurator\ContainerConfigurator;
 use Symfony\Component\DependencyInjection\Reference;
+use Symfony\Component\HttpClient\EventSourceHttpClient;
 use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Component\HttpKernel\Bundle\AbstractBundle;
 use Symfony\Component\Security\Core\Authorization\AuthorizationCheckerInterface;
@@ -110,6 +115,9 @@ final class AiBundle extends AbstractBundle
 
         foreach ($config['agent'] as $agentName => $agent) {
             $this->processAgentConfig($agentName, $agent, $builder);
+        }
+        if (1 === \count($config['agent']) && isset($agentName)) {
+            $builder->setAlias(AgentInterface::class, 'ai.agent.'.$agentName);
         }
 
         foreach ($config['store'] ?? [] as $type => $store) {
@@ -170,15 +178,11 @@ final class AiBundle extends AbstractBundle
                 ->setLazy(true)
                 ->addTag('proxy', ['interface' => PlatformInterface::class])
                 ->setArguments([
-                    0 => $platform['api_key'],
-                    2 => new Reference('http_client', ContainerInterface::NULL_ON_INVALID_REFERENCE),
-                    3 => new Reference('ai.platform.contract.anthropic'),
+                    $platform['api_key'],
+                    new Reference('http_client', ContainerInterface::NULL_ON_INVALID_REFERENCE),
+                    new Reference('ai.platform.contract.anthropic'),
                 ])
                 ->addTag('ai.platform');
-
-            if (isset($platform['version'])) {
-                $definition->setArgument(1, $platform['version']);
-            }
 
             $container->setDefinition($platformId, $definition);
 
@@ -237,6 +241,37 @@ final class AiBundle extends AbstractBundle
                     $platform['api_key'],
                     new Reference('http_client', ContainerInterface::NULL_ON_INVALID_REFERENCE),
                     new Reference('ai.platform.contract.google'),
+                ])
+                ->addTag('ai.platform');
+
+            $container->setDefinition($platformId, $definition);
+
+            return;
+        }
+
+        if ('vertexai' === $type && isset($platform['location'], $platform['project_id'])) {
+            if (!class_exists(ApplicationDefaultCredentials::class)) {
+                throw new RuntimeException('For using the Vertex AI platform, google/auth package is required. Try running "composer require google/auth".');
+            }
+
+            $credentials = ApplicationDefaultCredentials::getCredentials([
+                'https://www.googleapis.com/auth/cloud-platform',
+            ]);
+
+            $httpClient = new EventSourceHttpClient(HttpClient::create([
+                'auth_bearer' => $credentials?->fetchAuthToken()['access_token'] ?? null,
+            ]));
+
+            $platformId = 'ai.platform.vertexai';
+            $definition = (new Definition(Platform::class))
+                ->setFactory([VertexAiPlatformFactory::class, 'create'])
+                ->setLazy(true)
+                ->addTag('proxy', ['interface' => PlatformInterface::class])
+                ->setArguments([
+                    $platform['location'],
+                    $platform['project_id'],
+                    $httpClient,
+                    new Reference('ai.platform.contract.vertexai', ContainerInterface::NULL_ON_INVALID_REFERENCE),
                 ])
                 ->addTag('ai.platform');
 
@@ -353,6 +388,23 @@ final class AiBundle extends AbstractBundle
             return;
         }
 
+        if ('voyage' === $type && isset($platform['api_key'])) {
+            $platformId = 'ai.platform.voyage';
+            $definition = (new Definition(Platform::class))
+                ->setFactory(VoyagePlatformFactory::class.'::create')
+                ->setLazy(true)
+                ->addTag('proxy', ['interface' => PlatformInterface::class])
+                ->setArguments([
+                    $platform['api_key'],
+                    new Reference('http_client', ContainerInterface::NULL_ON_INVALID_REFERENCE),
+                ])
+                ->addTag('ai.platform');
+
+            $container->setDefinition($platformId, $definition);
+
+            return;
+        }
+
         throw new InvalidArgumentException(\sprintf('Platform "%s" is not supported for configuration via bundle at this point.', $type));
     }
 
@@ -380,6 +432,7 @@ final class AiBundle extends AbstractBundle
 
         // AGENT
         $agentDefinition = (new Definition(Agent::class))
+            ->addTag('ai.agent')
             ->setArgument(0, new Reference($config['platform']))
             ->setArgument(1, new Reference('ai.agent.'.$name.'.model'));
 

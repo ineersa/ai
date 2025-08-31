@@ -15,7 +15,6 @@ use Psr\Cache\CacheItemPoolInterface;
 use Symfony\AI\Agent\Chat\MessageStoreInterface;
 use Symfony\AI\Agent\Exception\RuntimeException;
 use Symfony\AI\Platform\Message\MessageBag;
-use Symfony\AI\Platform\Message\MessageBagInterface;
 
 final readonly class CacheStore implements MessageStoreInterface
 {
@@ -29,7 +28,7 @@ final readonly class CacheStore implements MessageStoreInterface
         }
     }
 
-    public function save(MessageBagInterface $messages): void
+    public function save(MessageBag $messages): void
     {
         $item = $this->cache->getItem($this->cacheKey);
 

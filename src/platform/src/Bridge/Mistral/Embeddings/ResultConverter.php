@@ -35,7 +35,7 @@ final readonly class ResultConverter implements ResultConverterInterface
         $httpResponse = $result->getObject();
 
         if (200 !== $httpResponse->getStatusCode()) {
-            throw new RuntimeException(\sprintf('Unexpected response code %d: ', $httpResponse->getStatusCode()).$httpResponse->getContent(false));
+            throw new RuntimeException(\sprintf('Unexpected response code %d: "%s"', $httpResponse->getStatusCode(), $httpResponse->getContent(false)));
         }
 
         $data = $result->getData();

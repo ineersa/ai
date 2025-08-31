@@ -54,7 +54,7 @@ $indexer = new Indexer($vectorizer, $store, logger());
 $indexer->index($documents);
 
 // initialize the index
-$store->initialize();
+$store->setup();
 
 $model = new Gpt(Gpt::GPT_4O_MINI);
 

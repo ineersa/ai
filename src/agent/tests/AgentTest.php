@@ -123,6 +123,16 @@ final class AgentTest extends TestCase
         new Agent($platform, $model, [], [$invalidProcessor]);
     }
 
+    public function testAgentExposesHisModel()
+    {
+        $platform = $this->createMock(PlatformInterface::class);
+        $model = $this->createMock(Model::class);
+
+        $agent = new Agent($platform, $model);
+
+        $this->assertSame($model, $agent->getModel());
+    }
+
     public function testCallProcessesInputThroughProcessors()
     {
         $platform = $this->createMock(PlatformInterface::class);

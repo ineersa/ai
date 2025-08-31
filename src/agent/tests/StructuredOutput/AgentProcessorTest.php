@@ -23,8 +23,8 @@ use Symfony\AI\Fixtures\StructuredOutput\MathReasoning;
 use Symfony\AI\Fixtures\StructuredOutput\Step;
 use Symfony\AI\Platform\Capability;
 use Symfony\AI\Platform\Message\MessageBag;
+use Symfony\AI\Platform\Metadata\Metadata;
 use Symfony\AI\Platform\Model;
-use Symfony\AI\Platform\Result\Metadata\Metadata;
 use Symfony\AI\Platform\Result\ObjectResult;
 use Symfony\AI\Platform\Result\TextResult;
 use Symfony\Component\Serializer\SerializerInterface;
@@ -130,6 +130,7 @@ final class AgentProcessorTest extends TestCase
                         "output": "x = -3.75"
                     }
                 ],
+                "confidence": 100,
                 "finalAnswer": "x = -3.75"
             }
             JSON);
@@ -148,6 +149,7 @@ final class AgentProcessorTest extends TestCase
         $this->assertInstanceOf(Step::class, $structure->steps[2]);
         $this->assertInstanceOf(Step::class, $structure->steps[3]);
         $this->assertInstanceOf(Step::class, $structure->steps[4]);
+        $this->assertSame(100, $structure->confidence);
         $this->assertSame('x = -3.75', $structure->finalAnswer);
     }
 

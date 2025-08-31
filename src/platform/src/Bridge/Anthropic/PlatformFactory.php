@@ -25,14 +25,13 @@ final readonly class PlatformFactory
     public static function create(
         #[\SensitiveParameter]
         string $apiKey,
-        string $version = '2023-06-01',
         ?HttpClientInterface $httpClient = null,
         ?Contract $contract = null,
     ): Platform {
         $httpClient = $httpClient instanceof EventSourceHttpClient ? $httpClient : new EventSourceHttpClient($httpClient);
 
         return new Platform(
-            [new ModelClient($httpClient, $apiKey, $version)],
+            [new ModelClient($httpClient, $apiKey)],
             [new ResultConverter()],
             $contract ?? AnthropicContract::create(),
         );

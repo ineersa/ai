@@ -13,18 +13,17 @@ namespace Symfony\AI\Agent\Chat\MessageStore;
 
 use Symfony\AI\Agent\Chat\MessageStoreInterface;
 use Symfony\AI\Platform\Message\MessageBag;
-use Symfony\AI\Platform\Message\MessageBagInterface;
 
 final class InMemoryStore implements MessageStoreInterface
 {
-    private MessageBagInterface $messages;
+    private MessageBag $messages;
 
-    public function save(MessageBagInterface $messages): void
+    public function save(MessageBag $messages): void
     {
         $this->messages = $messages;
     }
 
-    public function load(): MessageBagInterface
+    public function load(): MessageBag
     {
         return $this->messages ?? new MessageBag();
     }

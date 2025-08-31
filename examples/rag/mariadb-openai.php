@@ -47,7 +47,7 @@ foreach (Movies::all() as $i => $movie) {
 }
 
 // initialize the table
-$store->initialize();
+$store->setup();
 
 // create embeddings for documents
 $platform = PlatformFactory::create(env('OPENAI_API_KEY'), http_client());

@@ -21,7 +21,6 @@ use Symfony\AI\Agent\Chat\MessageStoreInterface;
 use Symfony\AI\Platform\Message\AssistantMessage;
 use Symfony\AI\Platform\Message\Message;
 use Symfony\AI\Platform\Message\MessageBag;
-use Symfony\AI\Platform\Message\MessageBagInterface;
 use Symfony\AI\Platform\Result\TextResult;
 
 #[CoversClass(Chat::class)]
@@ -44,7 +43,7 @@ final class ChatTest extends TestCase
 
     public function testItInitiatesChatByClearingAndSavingMessages()
     {
-        $messages = $this->createMock(MessageBagInterface::class);
+        $messages = $this->createMock(MessageBag::class);
 
         $this->store->expects($this->once())
             ->method('clear');
@@ -70,7 +69,7 @@ final class ChatTest extends TestCase
 
         $this->agent->expects($this->once())
             ->method('call')
-            ->with($this->callback(function (MessageBagInterface $messages) use ($userMessage) {
+            ->with($this->callback(function (MessageBag $messages) use ($userMessage) {
                 $messagesArray = $messages->getMessages();
 
                 return end($messagesArray) === $userMessage;
@@ -79,7 +78,7 @@ final class ChatTest extends TestCase
 
         $this->store->expects($this->once())
             ->method('save')
-            ->with($this->callback(function (MessageBagInterface $messages) use ($userMessage, $assistantContent) {
+            ->with($this->callback(function (MessageBag $messages) use ($userMessage, $assistantContent) {
                 $messagesArray = $messages->getMessages();
                 $lastTwo = \array_slice($messagesArray, -2);
 
@@ -115,7 +114,7 @@ final class ChatTest extends TestCase
 
         $this->agent->expects($this->once())
             ->method('call')
-            ->with($this->callback(function (MessageBagInterface $messages) {
+            ->with($this->callback(function (MessageBag $messages) {
                 $messagesArray = $messages->getMessages();
 
                 return 3 === \count($messagesArray);
@@ -124,7 +123,7 @@ final class ChatTest extends TestCase
 
         $this->store->expects($this->once())
             ->method('save')
-            ->with($this->callback(function (MessageBagInterface $messages) {
+            ->with($this->callback(function (MessageBag $messages) {
                 $messagesArray = $messages->getMessages();
 
                 return 4 === \count($messagesArray);
@@ -150,7 +149,7 @@ final class ChatTest extends TestCase
 
         $this->agent->expects($this->once())
             ->method('call')
-            ->with($this->callback(function (MessageBagInterface $messages) {
+            ->with($this->callback(function (MessageBag $messages) {
                 $messagesArray = $messages->getMessages();
 
                 return 1 === \count($messagesArray);

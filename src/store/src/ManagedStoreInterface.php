@@ -12,9 +12,14 @@
 namespace Symfony\AI\Store;
 
 /**
- * @author Guillaume Loulier <personal@guillaumeloulier.fr>
+ * @author Oskar Stark <oskarstark@googlemail.com>
  */
-interface DroppableStoreInterface
+interface ManagedStoreInterface
 {
+    /**
+     * @param array<mixed> $options
+     */
+    public function setup(array $options = []): void;
+
     public function drop(): void;
 }

@@ -48,7 +48,7 @@ foreach (Movies::all() as $i => $movie) {
 }
 
 // initialize the table
-$store->initialize(['dimensions' => 768]);
+$store->setup(['dimensions' => 768]);
 
 // create embeddings for documents
 $platform = PlatformFactory::create(env('GEMINI_API_KEY'), http_client());

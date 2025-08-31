@@ -14,7 +14,6 @@ namespace Symfony\AI\Agent\Chat\MessageStore;
 use Symfony\AI\Agent\Chat\MessageStoreInterface;
 use Symfony\AI\Agent\Exception\RuntimeException;
 use Symfony\AI\Platform\Message\MessageBag;
-use Symfony\AI\Platform\Message\MessageBagInterface;
 use Symfony\Component\HttpFoundation\RequestStack;
 use Symfony\Component\HttpFoundation\Session\SessionInterface;
 
@@ -32,12 +31,12 @@ final readonly class SessionStore implements MessageStoreInterface
         $this->session = $requestStack->getSession();
     }
 
-    public function save(MessageBagInterface $messages): void
+    public function save(MessageBag $messages): void
     {
         $this->session->set($this->sessionKey, $messages);
     }
 
-    public function load(): MessageBagInterface
+    public function load(): MessageBag
     {
         return $this->session->get($this->sessionKey, new MessageBag());
     }

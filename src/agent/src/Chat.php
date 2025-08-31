@@ -14,7 +14,7 @@ namespace Symfony\AI\Agent;
 use Symfony\AI\Agent\Chat\MessageStoreInterface;
 use Symfony\AI\Platform\Message\AssistantMessage;
 use Symfony\AI\Platform\Message\Message;
-use Symfony\AI\Platform\Message\MessageBagInterface;
+use Symfony\AI\Platform\Message\MessageBag;
 use Symfony\AI\Platform\Message\UserMessage;
 use Symfony\AI\Platform\Result\TextResult;
 
@@ -26,7 +26,7 @@ final readonly class Chat implements ChatInterface
     ) {
     }
 
-    public function initiate(MessageBagInterface $messages): void
+    public function initiate(MessageBag $messages): void
     {
         $this->store->clear();
         $this->store->save($messages);

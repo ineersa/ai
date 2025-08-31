@@ -54,7 +54,7 @@ foreach ($pastConversationPieces as $i => $message) {
 }
 
 // initialize the table
-$store->initialize();
+$store->setup();
 
 // create embeddings for documents as preparation of the chain memory
 $platform = PlatformFactory::create(env('OPENAI_API_KEY'), http_client());

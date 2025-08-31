@@ -27,7 +27,6 @@ final readonly class ModelClient implements ModelClientInterface
     public function __construct(
         HttpClientInterface $httpClient,
         #[\SensitiveParameter] private string $apiKey,
-        private string $version = '2023-06-01',
     ) {
         $this->httpClient = $httpClient instanceof EventSourceHttpClient ? $httpClient : new EventSourceHttpClient($httpClient);
     }
@@ -41,7 +40,7 @@ final readonly class ModelClient implements ModelClientInterface
     {
         $headers = [
             'x-api-key' => $this->apiKey,
-            'anthropic-version' => $this->version,
+            'anthropic-version' => '2023-06-01',
         ];
 
         if (isset($options['tools'])) {

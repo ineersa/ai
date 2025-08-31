@@ -11,7 +11,7 @@
 
 namespace Symfony\AI\Agent;
 
-use Symfony\AI\Platform\Message\MessageBagInterface;
+use Symfony\AI\Platform\Message\MessageBag;
 use Symfony\AI\Platform\Model;
 
 /**
@@ -24,7 +24,7 @@ final class Input
      */
     public function __construct(
         public Model $model,
-        public MessageBagInterface $messages,
+        public MessageBag $messages,
         private array $options,
     ) {
     }

@@ -24,21 +24,20 @@ use Symfony\AI\Store\Document\Metadata;
 use Symfony\AI\Store\Document\TextDocument;
 use Symfony\AI\Store\Document\Vectorizer;
 use Symfony\AI\Store\Indexer;
-use Symfony\Component\HttpClient\HttpClient;
 use Symfony\Component\Uid\Uuid;
 
 require_once dirname(__DIR__).'/bootstrap.php';
 
 // initialize the store
 $store = new Store(
-    HttpClient::create(),
+    http_client(),
     env('QDRANT_HOST'),
     env('QDRANT_SERVICE_API_KEY'),
     'movies',
 );
 
 // initialize the collection (needs to be called before the indexer)
-$store->initialize();
+$store->setup();
 
 // create embeddings and documents
 foreach (Movies::all() as $movie) {

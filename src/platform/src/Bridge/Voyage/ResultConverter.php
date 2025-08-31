@@ -37,8 +37,11 @@ final readonly class ResultConverter implements ResultConverterInterface
             throw new RuntimeException('Response does not contain embedding data.');
         }
 
-        $vectors = array_map(fn (array $data) => new Vector($data['embedding']), $result['data']);
-
-        return new VectorResult($vectors[0]);
+        return new VectorResult(
+            ...array_map(
+                static fn (array $data) => new Vector($data['embedding']),
+                $result['data'],
+            ),
+        );
     }
 }

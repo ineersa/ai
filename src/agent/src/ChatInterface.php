@@ -13,12 +13,12 @@ namespace Symfony\AI\Agent;
 
 use Symfony\AI\Agent\Exception\ExceptionInterface;
 use Symfony\AI\Platform\Message\AssistantMessage;
-use Symfony\AI\Platform\Message\MessageBagInterface;
+use Symfony\AI\Platform\Message\MessageBag;
 use Symfony\AI\Platform\Message\UserMessage;
 
 interface ChatInterface
 {
-    public function initiate(MessageBagInterface $messages): void;
+    public function initiate(MessageBag $messages): void;
 
     /**
      * @throws ExceptionInterface When the chat submission fails due to agent errors
