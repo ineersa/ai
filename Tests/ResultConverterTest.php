@@ -55,6 +55,8 @@ use Symfony\AI\Platform\Result\ThinkingResult;
 use Symfony\AI\Platform\Result\ToolCallResult;
 use Symfony\AI\Platform\Result\WebSearchResult;
 use Symfony\AI\Platform\TokenUsage\TokenUsage;
+use Symfony\Component\HttpClient\MockHttpClient;
+use Symfony\Component\HttpClient\Response\MockResponse;
 use Symfony\Contracts\HttpClient\Exception\ClientExceptionInterface;
 use Symfony\Contracts\HttpClient\ResponseInterface;
 
@@ -1185,6 +1187,77 @@ final class ResultConverterTest extends TestCase
         $this->expectExceptionMessage('Invalid API key provided');
 
         $converter->convert(new RawHttpResult($httpResponse));
+    }
+
+    #[DataProvider('provideAuthenticationErrorBodies')]
+    public function testThrowsAuthenticationExceptionWithUnexpectedBody(string $body)
+    {
+        $client = new MockHttpClient(new MockResponse($body, ['http_code' => 401]));
+
+        $this->expectException(AuthenticationException::class);
+        $this->expectExceptionMessage('Authentication failed (HTTP 401).');
+
+        (new ResultConverter())->convert(new RawHttpResult($client->request('POST', 'https://example.com/v1/responses')));
+    }
+
+    public static function provideAuthenticationErrorBodies(): iterable
+    {
+        yield 'empty object' => ['{}'];
+        yield 'empty body' => [''];
+        yield 'HTML' => ['<html>Unauthorized</html>'];
+        yield 'JSON null' => ['null'];
+        yield 'JSON string' => ['"Unauthorized"'];
+        yield 'string error' => ['{"error":"Unauthorized"}'];
+        yield 'null message' => ['{"error":{"message":null}}'];
+        yield 'array message' => ['{"error":{"message":[]}}'];
+        yield 'integer message' => ['{"error":{"message":401}}'];
+        yield 'empty message' => ['{"error":{"message":""}}'];
+        yield 'array detail' => ['{"detail":[{"msg":"Unauthorized"}]}'];
+    }
+
+    /**
+     * @param class-string<\Throwable> $exceptionClass
+     */
+    #[DataProvider('provideErrorStatusCodes')]
+    public function testUsesDetailAsErrorMessageFallback(int $statusCode, string $exceptionClass)
+    {
+        $client = new MockHttpClient(new MockResponse('{"detail":"Missing Bearer authorization header"}', ['http_code' => $statusCode]));
+
+        $this->expectException($exceptionClass);
+        $this->expectExceptionMessage('Missing Bearer authorization header');
+
+        (new ResultConverter())->convert(new RawHttpResult($client->request('POST', 'https://example.com/v1/responses')));
+    }
+
+    public function testPrefersErrorMessageOverDetail()
+    {
+        $client = new MockHttpClient(new MockResponse('{"error":{"message":"Invalid API key provided"},"detail":"Unauthorized"}', ['http_code' => 401]));
+
+        $this->expectException(AuthenticationException::class);
+        $this->expectExceptionMessage('Invalid API key provided');
+
+        (new ResultConverter())->convert(new RawHttpResult($client->request('POST', 'https://example.com/v1/responses')));
+    }
+
+    /**
+     * @param class-string<\Throwable> $exceptionClass
+     */
+    #[DataProvider('provideErrorStatusCodes')]
+    public function testThrowsPlatformExceptionWithNonStringErrorMessage(int $statusCode, string $exceptionClass)
+    {
+        $client = new MockHttpClient(new MockResponse('{"error":{"message":[]}}', ['http_code' => $statusCode]));
+
+        $this->expectException($exceptionClass);
+
+        (new ResultConverter())->convert(new RawHttpResult($client->request('POST', 'https://example.com/v1/responses')));
+    }
+
+    public static function provideErrorStatusCodes(): iterable
+    {
+        yield 'bad request' => [400, BadRequestException::class];
+        yield 'authentication' => [401, AuthenticationException::class];
+        yield 'rate limit' => [429, RateLimitExceededException::class];
+        yield 'server error' => [500, ServerException::class];
     }
 
     public function testThrowsExceptionWhenNoOutput()
