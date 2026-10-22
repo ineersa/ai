@@ -1044,6 +1044,22 @@ final class ResultConverterTest extends TestCase
         $converter->convert(new RawHttpResult($httpResponse));
     }
 
+    public function testThrowsMaxOutputTokensExceptionWhenIncompleteResponseHasEmptyOutput()
+    {
+        $converter = new ResultConverter();
+        $httpResponse = $this->createMock(ResponseInterface::class);
+        $httpResponse->method('toArray')->willReturn([
+            'status' => 'incomplete',
+            'incomplete_details' => ['reason' => 'max_output_tokens'],
+            'output' => [],
+        ]);
+
+        $this->expectException(MaxOutputTokensException::class);
+        $this->expectExceptionMessage('Responses API truncated the response after reaching the output token limit.');
+
+        $converter->convert(new RawHttpResult($httpResponse));
+    }
+
     /**
      * @param array<string, mixed> $item
      */

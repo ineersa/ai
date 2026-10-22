@@ -159,7 +159,11 @@ class ResultConverter implements ResultConverterInterface
             $incompleteReason = self::normalizeIncompleteReason($data['incomplete_details']['reason'] ?? null);
         }
 
-        $lastItemType = $data[self::KEY_OUTPUT][array_key_last($data[self::KEY_OUTPUT])]['type'] ?? null;
+        $lastItemType = null;
+        if ([] !== $data[self::KEY_OUTPUT]) {
+            $lastItemType = $data[self::KEY_OUTPUT][array_key_last($data[self::KEY_OUTPUT])]['type'] ?? null;
+        }
+
         if ('max_output_tokens' === $incompleteReason && \in_array($lastItemType, ['function_call', 'custom_tool_call'], true)) {
             throw new MaxOutputTokensException(self::MAX_OUTPUT_TOKENS_MESSAGE);
         }
