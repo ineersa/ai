@@ -94,15 +94,14 @@ class ResultConverter implements ResultConverterInterface
         $response = $result->getObject();
 
         if (401 === $response->getStatusCode()) {
-            $errorMessage = json_decode($response->getContent(false), true)['error']['message'];
-            throw new AuthenticationException($errorMessage);
+            throw new AuthenticationException($this->extractErrorMessage($response) ?? 'Authentication failed (HTTP 401).');
         }
 
         if (400 === $response->getStatusCode()) {
-            $error = json_decode($response->getContent(false), true)['error'] ?? [];
-            $errorMessage = $error['message'] ?? 'Bad Request';
+            $errorCode = json_decode($response->getContent(false), true)['error']['code'] ?? null;
+            $errorMessage = $this->extractErrorMessage($response) ?? 'Bad Request';
 
-            if ('context_length_exceeded' === ($error['code'] ?? null)
+            if ('context_length_exceeded' === $errorCode
                 || str_contains($errorMessage, 'exceeds the context window')
                 || str_contains($errorMessage, 'max_model_len')
             ) {
@@ -113,13 +112,11 @@ class ResultConverter implements ResultConverterInterface
         }
 
         if (429 === $response->getStatusCode()) {
-            $errorMessage = json_decode($response->getContent(false), true)['error']['message'] ?? null;
-            throw new RateLimitExceededException($this->extractRateLimitReset($response), $errorMessage);
+            throw new RateLimitExceededException($this->extractRateLimitReset($response), $this->extractErrorMessage($response));
         }
 
         if (($code = $response->getStatusCode()) >= 500) {
-            $errorMessage = json_decode($response->getContent(false), true)['error']['message'] ?? null;
-            throw new ServerException($code, $errorMessage);
+            throw new ServerException($code, $this->extractErrorMessage($response));
         }
 
         if ($options['stream'] ?? false) {
@@ -201,6 +198,15 @@ class ResultConverter implements ResultConverterInterface
     protected function extractRateLimitReset(ResponseInterface $response): ?int
     {
         return null;
+    }
+
+    private function extractErrorMessage(ResponseInterface $response): ?string
+    {
+        $data = json_decode($response->getContent(false), true);
+        // Non-conforming gateways (e.g. FastAPI-based) report the reason under "detail".
+        $errorMessage = $data['error']['message'] ?? $data['detail'] ?? null;
+
+        return \is_string($errorMessage) && '' !== $errorMessage ? $errorMessage : null;
     }
 
     /**
