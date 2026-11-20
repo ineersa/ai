@@ -1,0 +1,178 @@
+<?php
+
+/*
+ * This file is part of the Symfony package.
+ *
+ * (c) Fabien Potencier <fabien@symfony.com>
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+namespace Symfony\AI\Agent\Tests\Toolbox;
+
+use PHPUnit\Framework\Attributes\TestWith;
+use PHPUnit\Framework\TestCase;
+use Symfony\AI\Agent\Tests\Fixtures\Tool\ToolArray;
+use Symfony\AI\Agent\Tests\Fixtures\Tool\ToolArrayMultidimensional;
+use Symfony\AI\Agent\Tests\Fixtures\Tool\ToolDate;
+use Symfony\AI\Agent\Tests\Fixtures\Tool\ToolNoParams;
+use Symfony\AI\Agent\Tests\Fixtures\Tool\ToolObjectFloat;
+use Symfony\AI\Agent\Tests\Fixtures\Tool\ToolOptionalParam;
+use Symfony\AI\Agent\Tests\Fixtures\Tool\ToolScalarFloat;
+use Symfony\AI\Agent\Tests\Fixtures\Tool\ToolWithBackedEnums;
+use Symfony\AI\Agent\Tests\Fixtures\Tool\ToolWithNullableClass;
+use Symfony\AI\Agent\Toolbox\Exception\InvalidToolCallArgumentsException;
+use Symfony\AI\Agent\Toolbox\ToolCallArgumentResolver;
+use Symfony\AI\Platform\Result\ToolCall;
+use Symfony\AI\Platform\Tests\Fixtures\StructuredOutput\SomeStructure;
+use Symfony\AI\Platform\Tool\ExecutionReference;
+use Symfony\AI\Platform\Tool\Tool;
+use Symfony\Component\Serializer\Exception\NotNormalizableValueException;
+
+class ToolCallArgumentResolverTest extends TestCase
+{
+    public function testResolveArguments()
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolDate::class, '__invoke'), 'tool_date', 'test');
+        $toolCall = new ToolCall('invocation', 'tool_date', ['date' => '2025-06-29']);
+
+        $this->assertEquals(['date' => new \DateTimeImmutable('2025-06-29')], $resolver->resolveArguments($metadata, $toolCall));
+    }
+
+    public function testResolveScalarArrayArguments()
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolArray::class, '__invoke'), 'tool_array', 'A tool with array parameters');
+        $toolCall = new ToolCall('tool_id_1234', 'tool_array', [
+            'urls' => ['https://symfony.com', 'https://php.net'],
+            'ids' => [1, 2, 3],
+        ]);
+
+        $expected = [
+            'urls' => ['https://symfony.com', 'https://php.net'],
+            'ids' => [1, 2, 3],
+        ];
+
+        $this->assertSame($expected, $resolver->resolveArguments($metadata, $toolCall));
+    }
+
+    public function testResolveMultidimensionalArrayArguments()
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolArrayMultidimensional::class, '__invoke'), 'tool_array_multidimensional', 'A tool with multidimensional array parameters');
+        $toolCall = new ToolCall('tool_id_1234', 'tool_array_multidimensional', [
+            'vectors' => [[1.2, 3.4], [4.5, 5.6]],
+            'sequences' => ['first' => [1, 2, 3], 'second' => [4, 5, 6]],
+            'objects' => [[['some' => 'a'], ['some' => 'b']]],
+        ]);
+
+        $expected = [
+            'vectors' => [[1.2, 3.4], [4.5, 5.6]],
+            'sequences' => ['first' => [1, 2, 3], 'second' => [4, 5, 6]],
+            'objects' => [[new SomeStructure('a'), new SomeStructure('b')]],
+        ];
+
+        $this->assertEquals($expected, $resolver->resolveArguments($metadata, $toolCall));
+    }
+
+    public function testIgnoreExtraArguments()
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolNoParams::class, '__invoke'), 'tool_no_params', 'A tool without params');
+        $toolCall = new ToolCall('tool_id_1234', 'tool_no_params', [
+            'foo' => 1,
+            'bar' => 2,
+            'baz' => 3,
+        ]);
+
+        $this->assertSame([], $resolver->resolveArguments($metadata, $toolCall));
+    }
+
+    public function testIntCastToFloat()
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolObjectFloat::class, '__invoke'), 'tool_object_float', 'A tool with object');
+        $toolCall = new ToolCall('tool_id_1234', 'tool_object_float', ['person' => ['height' => 1]]);
+
+        $personArgument = $resolver->resolveArguments($metadata, $toolCall)['person'];
+        $this->assertInstanceOf(ToolObjectFloat::class, $personArgument);
+        $this->assertSame(1.0, $personArgument->height);
+    }
+
+    public function testIntCastToFloatForScalarParameters()
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolScalarFloat::class, '__invoke'), 'tool_scalar_float', 'A tool with float parameters');
+        $toolCall = new ToolCall('tool_id_1234', 'tool_scalar_float', ['height' => 1, 'weight' => 80]);
+
+        $this->assertSame(['height' => 1.0, 'weight' => 80.0], $resolver->resolveArguments($metadata, $toolCall));
+    }
+
+    public function testThrowsWhenMandatoryParameterMissing()
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolOptionalParam::class, 'bar'), 'tool_optional_param', 'A tool with one optional parameter');
+        $toolCall = new ToolCall('invocation', 'tool_optional_param', ['number' => 5]);
+
+        $this->expectException(InvalidToolCallArgumentsException::class);
+        $this->expectExceptionMessage('Parameter "text" is mandatory for tool "tool_optional_param".');
+        $arguments = $resolver->resolveArguments($metadata, $toolCall);
+    }
+
+    public function testContinuesWhenOptionalParameterMissing()
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolOptionalParam::class, 'bar'), 'tool_optional_param', 'A tool with one optional parameter');
+        $toolCall = new ToolCall('invocation', 'tool_optional_param', ['text' => 'hello']);
+
+        $arguments = $resolver->resolveArguments($metadata, $toolCall);
+
+        $this->assertSame(['text' => 'hello'], $arguments);
+    }
+
+    /**
+     * @param array{structure: SomeStructure|null}       $expected
+     * @param array{structure: array{some: string}|null} $toolParams
+     */
+    #[TestWith([['structure' => new SomeStructure('value')], ['structure' => ['some' => 'value']]], 'object')]
+    #[TestWith([['structure' => null], ['structure' => null]], 'null')]
+    public function testResolveNullableClassArgumentWhenPresent(array $expected, array $toolParams)
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolWithNullableClass::class, '__invoke'), 'tool_with_nullable_class', 'test');
+        $toolCall = new ToolCall('invocation', 'tool_with_nullable_class', $toolParams);
+
+        $this->assertEquals($expected, $resolver->resolveArguments($metadata, $toolCall));
+    }
+
+    public function testResolveArgumentsThrowsWhenValueCannotBeDenormalized()
+    {
+        $resolver = new ToolCallArgumentResolver();
+
+        $metadata = new Tool(new ExecutionReference(ToolWithBackedEnums::class, '__invoke'), 'tool_with_backed_enums', 'A tool with backed enum parameters');
+        $toolCall = new ToolCall('invocation', 'tool_with_backed_enums', [
+            'searchTerms' => ['symfony'],
+            'mode' => 'not_a_mode',
+            'priority' => 'high',
+        ]);
+
+        try {
+            $resolver->resolveArguments($metadata, $toolCall);
+            $this->fail(\sprintf('Expected exception of type "%s" to be thrown.', InvalidToolCallArgumentsException::class));
+        } catch (InvalidToolCallArgumentsException $e) {
+            $this->assertStringStartsWith('Invalid value for parameter "mode" of tool "tool_with_backed_enums":', $e->getMessage());
+            $this->assertInstanceOf(NotNormalizableValueException::class, $e->getPrevious());
+        }
+    }
+}

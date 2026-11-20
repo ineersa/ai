@@ -1,0 +1,367 @@
+<?php
+
+/*
+ * This file is part of the Symfony package.
+ *
+ * (c) Fabien Potencier <fabien@symfony.com>
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+namespace Symfony\AI\Agent\Execution;
+
+use Symfony\AI\Agent\Exception\CancellationException;
+use Symfony\AI\Agent\Exception\LogicException;
+use Symfony\AI\Agent\Exception\RuntimeException;
+use Symfony\AI\Agent\Execution\Update\Progress;
+use Symfony\AI\Agent\Execution\Update\Result;
+use Symfony\AI\Platform\Message\MessageBag;
+use Symfony\AI\Platform\Metadata\Metadata;
+use Symfony\AI\Platform\Result\MultiPartResult;
+use Symfony\AI\Platform\Result\RawResultInterface;
+use Symfony\AI\Platform\Result\ResultInterface;
+use Symfony\AI\Platform\Result\Stream\Delta\DeltaInterface;
+use Symfony\AI\Platform\Result\ToolCall;
+use Symfony\AI\Platform\Result\ToolCallResult;
+use Symfony\AI\Platform\Result\TypedResultTrait;
+use Symfony\Component\Uid\AbstractUid;
+use Symfony\Component\Uid\TimeBasedUidInterface;
+use Symfony\Component\Uid\Uuid;
+
+/**
+ * A lazy agent execution that is also the {@see ResultInterface} it produces.
+ *
+ * Returned by {@see \Symfony\AI\Agent\AgentInterface::call()}, it can be consumed in three ways:
+ *  - as a result:    $execution->getContent()                              (drives to completion, returns the answer)
+ *  - as a process:   foreach ($execution as $update) { ... }               (observe every progress and result update)
+ *  - with callbacks: $execution->onProgress(...)->onResult(...)->getResult()   (drives to completion, returns the result)
+ *
+ * Consuming drives the agent, including its side effects. The final result is cached, so reading it (via
+ * getContent()/getResult()/getMetadata()) is idempotent; re-iterating a consumed execution throws — call the
+ * agent again for a fresh execution.
+ *
+ * The typed accessors of {@see TypedResultTrait} narrow the result (asText(), asObject(), ...) or, with the
+ * stream option, its deltas (asStream(), asTextStream(), asStreamedObject(), ...).
+ *
+ * @author Christopher Hertel <mail@christopher-hertel.de>
+ */
+final class Execution implements ExecutionInterface
+{
+    use TypedResultTrait {
+        asVectors as private;
+        asReranking as private;
+    }
+
+    /**
+     * @var list<callable(Progress): void>
+     */
+    private array $progressCallbacks = [];
+
+    /**
+     * @var list<callable(Result): void>
+     */
+    private array $resultCallbacks = [];
+
+    private bool $consumed = false;
+
+    private bool $canceled = false;
+
+    private bool $finished = false;
+
+    private ?ResultInterface $result = null;
+
+    private ?Result $resultUpdate = null;
+
+    private ?string $error = null;
+
+    private readonly Metadata $metadata;
+
+    private readonly Cancellation $cancellation;
+
+    private readonly AbstractUid&TimeBasedUidInterface $id;
+
+    /**
+     * @param \Closure(): \Generator<int, UpdateInterface, mixed, void> $factory
+     * @param bool                                                      $streamed whether the answer is streamed, in which case getContent() yields the deltas
+     */
+    public function __construct(
+        private readonly \Closure $factory,
+        private readonly bool $streamed = false,
+        ?Cancellation $cancellation = null,
+    ) {
+        $this->metadata = new Metadata();
+        $this->cancellation = $cancellation ?? new Cancellation();
+        $this->id = Uuid::v7();
+    }
+
+    /**
+     * Identifies this run, the conversation is identified by the id of its MessageBag.
+     */
+    public function getId(): AbstractUid&TimeBasedUidInterface
+    {
+        return $this->id;
+    }
+
+    /**
+     * @return \Generator<int, UpdateInterface, mixed, void>
+     */
+    public function getIterator(): \Generator
+    {
+        yield from $this->consume();
+    }
+
+    public function getStatus(): ExecutionStatus
+    {
+        if ($this->canceled) {
+            return ExecutionStatus::Cancelled;
+        }
+
+        if (null !== $this->error) {
+            return ExecutionStatus::Failed;
+        }
+
+        if (null !== $this->result) {
+            return [] === $this->getPendingToolCalls() ? ExecutionStatus::Completed : ExecutionStatus::WaitingForInput;
+        }
+
+        return $this->consumed ? ExecutionStatus::Running : ExecutionStatus::Pending;
+    }
+
+    /**
+     * Whether tool calls of the model are unanswered, see {@see ExecutionStatus::WaitingForInput}.
+     */
+    public function isSuspended(): bool
+    {
+        return ExecutionStatus::WaitingForInput === $this->getStatus();
+    }
+
+    /**
+     * The tool calls of the final result, left unanswered by the agent.
+     *
+     * @return list<ToolCall>
+     */
+    public function getPendingToolCalls(): array
+    {
+        $parts = $this->result instanceof MultiPartResult ? $this->result->getContent() : [$this->result];
+
+        $toolCalls = [];
+        foreach ($parts as $part) {
+            if ($part instanceof ToolCallResult) {
+                array_push($toolCalls, ...array_values($part->getContent()));
+            }
+        }
+
+        return $toolCalls;
+    }
+
+    /**
+     * The message of the error of a failed execution.
+     */
+    public function getError(): ?string
+    {
+        return $this->error;
+    }
+
+    /**
+     * @param callable(Progress): void $callback
+     */
+    public function onProgress(callable $callback): self
+    {
+        $this->progressCallbacks[] = $callback;
+
+        return $this;
+    }
+
+    /**
+     * @param callable(Result): void $callback
+     */
+    public function onResult(callable $callback): self
+    {
+        $this->resultCallbacks[] = $callback;
+
+        return $this;
+    }
+
+    /**
+     * Whether the answer is streamed, in which case getContent() yields the deltas.
+     */
+    public function isStreamed(): bool
+    {
+        return $this->streamed;
+    }
+
+    /**
+     * Cancels the execution and its active HTTP response.
+     */
+    public function cancel(?string $reason = null): void
+    {
+        if ($this->canceled || $this->finished || null !== $this->result) {
+            return;
+        }
+
+        $this->canceled = true;
+        $this->cancellation->request($reason);
+    }
+
+    /**
+     * Drives the execution to completion and returns the final result.
+     *
+     * @throws CancellationException when the execution was canceled
+     */
+    public function getResult(): ResultInterface
+    {
+        if (null !== $this->result) {
+            return $this->result;
+        }
+
+        if ($this->consumed && $this->canceled) {
+            throw new CancellationException($this->cancellation->getReason());
+        }
+
+        foreach ($this->consume() as $update) {
+            if ($update instanceof Result) {
+                return $update->getResult();
+            }
+        }
+
+        if ($this->canceled) {
+            throw new CancellationException($this->cancellation->getReason());
+        }
+
+        throw new RuntimeException('The agent execution finished without producing a result.');
+    }
+
+    /**
+     * Drives the execution to completion and returns the given messages followed by the new ones, ending with the answer.
+     *
+     * @throws LogicException when the agent doesn't provide the messages of its execution
+     */
+    public function getMessages(): MessageBag
+    {
+        $this->getResult();
+
+        if (null === $messages = $this->resultUpdate?->getMessages()) {
+            throw new LogicException('The agent did not provide the messages of its execution.');
+        }
+
+        return $messages;
+    }
+
+    public function getContent(): string|iterable|object|null
+    {
+        if ($this->streamed) {
+            return $this->asStream();
+        }
+
+        return $this->getResult()->getContent();
+    }
+
+    public function getMetadata(): Metadata
+    {
+        if ($this->streamed) {
+            // populated while the deltas are consumed, mirroring a StreamResult
+            return $this->metadata;
+        }
+
+        return $this->getResult()->getMetadata();
+    }
+
+    public function getRawResult(): ?RawResultInterface
+    {
+        return $this->getResult()->getRawResult();
+    }
+
+    public function setRawResult(RawResultInterface $rawResult): void
+    {
+        $this->getResult()->setRawResult($rawResult);
+    }
+
+    /**
+     * Yields the streamed deltas of the answer, driving the execution as they arrive.
+     *
+     * @return \Generator<int, DeltaInterface, mixed, void>
+     *
+     * @throws LogicException when the answer is not streamed
+     */
+    public function asStream(): \Generator
+    {
+        if (!$this->streamed) {
+            throw new LogicException('The execution is not streamed, pass the "stream" option to the agent to stream its answer.');
+        }
+
+        foreach ($this->consume() as $update) {
+            if ($update instanceof Progress && Progress::STAGE_DELTA === $update->getStage() && $update->getPayload() instanceof DeltaInterface) {
+                yield $update->getPayload();
+            }
+        }
+    }
+
+    /**
+     * Runs the agent and passes its updates through, keeping the final result and its metadata
+     * and invoking the registered callbacks along the way, whichever way the execution is consumed.
+     *
+     * An execution runs the agent, including its side effects — consuming it
+     * twice would silently run the agent twice.
+     *
+     * @return \Generator<int, UpdateInterface, mixed, void>
+     */
+    private function consume(): \Generator
+    {
+        if ($this->consumed) {
+            throw new LogicException('The execution was already consumed. Call the agent again for a new execution.');
+        }
+
+        $this->consumed = true;
+
+        if ($this->canceled) {
+            $this->finished = true;
+
+            return;
+        }
+
+        try {
+            foreach (($this->factory)() as $update) {
+                if ($this->canceled) {
+                    break;
+                }
+
+                if ($update instanceof Result) {
+                    // the final result carries the metadata aggregated over all rounds, e.g. token usage
+                    $this->result = $update->getResult();
+                    $this->resultUpdate = $update;
+                    $this->metadata->merge($update->getResult()->getMetadata());
+
+                    foreach ($this->resultCallbacks as $callback) {
+                        $callback($update);
+                    }
+                }
+
+                if ($update instanceof Progress) {
+                    foreach ($this->progressCallbacks as $callback) {
+                        $callback($update);
+                    }
+                }
+
+                yield $update;
+
+                // @phpstan-ignore if.alwaysFalse (cancellation can happen while the generator is suspended)
+                if ($this->canceled) {
+                    break;
+                }
+            }
+        } catch (\Throwable $exception) {
+            if (!$this->canceled) {
+                $this->error = $exception->getMessage();
+
+                throw $exception;
+            }
+        } finally {
+            $this->finished = true;
+
+            if (!$this->canceled && null === $this->result) {
+                $this->error ??= 'The agent execution finished without producing a result.';
+            }
+        }
+    }
+}

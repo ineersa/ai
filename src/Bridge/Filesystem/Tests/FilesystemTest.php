@@ -1,0 +1,624 @@
+<?php
+
+/*
+ * This file is part of the Symfony package.
+ *
+ * (c) Fabien Potencier <fabien@symfony.com>
+ *
+ * For the full copyright and license information, please view the LICENSE
+ * file that was distributed with this source code.
+ */
+
+namespace Symfony\AI\Agent\Bridge\Filesystem\Tests;
+
+use PHPUnit\Framework\Attributes\DataProvider;
+use PHPUnit\Framework\TestCase;
+use Symfony\AI\Agent\Bridge\Filesystem\Exception\OperationNotPermittedException;
+use Symfony\AI\Agent\Bridge\Filesystem\Exception\PathSecurityException;
+use Symfony\AI\Agent\Bridge\Filesystem\Filesystem;
+use Symfony\AI\Agent\Bridge\Filesystem\Tests\Fixtures\StatTrackingStreamWrapper;
+use Symfony\AI\Agent\Toolbox\FaultTolerantToolbox;
+use Symfony\AI\Agent\Toolbox\Toolbox;
+use Symfony\AI\Platform\Result\ToolCall;
+use Symfony\Component\Filesystem\Filesystem as SymfonyFilesystem;
+
+class FilesystemTest extends TestCase
+{
+    private string $fixturesPath;
+    private string $tempPath;
+    private SymfonyFilesystem $symfonyFilesystem;
+
+    protected function setUp(): void
+    {
+        $this->fixturesPath = __DIR__.'/Fixtures';
+        $this->tempPath = sys_get_temp_dir().'/filesystem_test_'.uniqid();
+        $this->symfonyFilesystem = new SymfonyFilesystem();
+
+        $this->symfonyFilesystem->mkdir($this->tempPath);
+        $this->symfonyFilesystem->mirror($this->fixturesPath, $this->tempPath);
+    }
+
+    protected function tearDown(): void
+    {
+        $this->symfonyFilesystem->remove($this->tempPath);
+    }
+
+    public function testRead()
+    {
+        $filesystem = $this->createFilesystem();
+        $content = $filesystem->read('sample.txt');
+
+        $this->assertStringContainsString('Hello, World!', $content);
+    }
+
+    public function testReadNestedFile()
+    {
+        $filesystem = $this->createFilesystem();
+        $content = $filesystem->read('nested/file.txt');
+
+        $this->assertStringContainsString('nested file', $content);
+    }
+
+    public function testReadThrowsOnDirectory()
+    {
+        $filesystem = $this->createFilesystem();
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('is not a file');
+
+        $filesystem->read('nested');
+    }
+
+    public function testReadThrowsOnFileTooLarge()
+    {
+        $largePath = $this->tempPath.'/large.txt';
+        $this->symfonyFilesystem->dumpFile($largePath, str_repeat('x', 1024));
+
+        $filesystem = $this->createFilesystem(maxReadSize: 512);
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('exceeds maximum read size');
+
+        $filesystem->read('large.txt');
+    }
+
+    public function testWrite()
+    {
+        $filesystem = $this->createFilesystem();
+        $result = $filesystem->write('newfile.txt', 'New content');
+
+        $this->assertStringContainsString('Successfully wrote', $result);
+        $this->assertFileExists($this->tempPath.'/newfile.txt');
+        $this->assertSame('New content', file_get_contents($this->tempPath.'/newfile.txt'));
+    }
+
+    public function testWriteOverwritesExisting()
+    {
+        $filesystem = $this->createFilesystem();
+        $filesystem->write('sample.txt', 'Overwritten content');
+
+        $this->assertSame('Overwritten content', file_get_contents($this->tempPath.'/sample.txt'));
+    }
+
+    public function testWriteThrowsWhenNotAllowed()
+    {
+        $filesystem = $this->createFilesystem(allowWrite: false);
+
+        $this->expectException(OperationNotPermittedException::class);
+        $this->expectExceptionMessage('Write operations are not permitted');
+
+        $filesystem->write('newfile.txt', 'content');
+    }
+
+    public function testAppend()
+    {
+        $filesystem = $this->createFilesystem();
+        $filesystem->append('sample.txt', ' Appended!');
+
+        $this->assertStringContainsString('Appended!', file_get_contents($this->tempPath.'/sample.txt'));
+    }
+
+    public function testAppendCreatesNewFile()
+    {
+        $filesystem = $this->createFilesystem();
+        $filesystem->append('appended.txt', 'New content');
+
+        $this->assertFileExists($this->tempPath.'/appended.txt');
+        $this->assertSame('New content', file_get_contents($this->tempPath.'/appended.txt'));
+    }
+
+    public function testAppendThrowsWhenNotAllowed()
+    {
+        $filesystem = $this->createFilesystem(allowWrite: false);
+
+        $this->expectException(OperationNotPermittedException::class);
+
+        $filesystem->append('sample.txt', 'content');
+    }
+
+    public function testCopy()
+    {
+        $filesystem = $this->createFilesystem();
+        $result = $filesystem->copy('sample.txt', 'sample_copy.txt');
+
+        $this->assertStringContainsString('Successfully copied', $result);
+        $this->assertFileExists($this->tempPath.'/sample_copy.txt');
+        $this->assertSame(
+            file_get_contents($this->tempPath.'/sample.txt'),
+            file_get_contents($this->tempPath.'/sample_copy.txt')
+        );
+    }
+
+    public function testCopyThrowsWhenNotAllowed()
+    {
+        $filesystem = $this->createFilesystem(allowWrite: false);
+
+        $this->expectException(OperationNotPermittedException::class);
+
+        $filesystem->copy('sample.txt', 'sample_copy.txt');
+    }
+
+    public function testMove()
+    {
+        $filesystem = $this->createFilesystem();
+        $originalContent = file_get_contents($this->tempPath.'/sample.txt');
+
+        $result = $filesystem->move('sample.txt', 'moved.txt');
+
+        $this->assertStringContainsString('Successfully moved', $result);
+        $this->assertFileDoesNotExist($this->tempPath.'/sample.txt');
+        $this->assertFileExists($this->tempPath.'/moved.txt');
+        $this->assertSame($originalContent, file_get_contents($this->tempPath.'/moved.txt'));
+    }
+
+    public function testMoveThrowsWhenNotAllowed()
+    {
+        $filesystem = $this->createFilesystem(allowWrite: false);
+
+        $this->expectException(OperationNotPermittedException::class);
+
+        $filesystem->move('sample.txt', 'moved.txt');
+    }
+
+    public function testMoveValidatesPathBeforeCheckingItsType()
+    {
+        StatTrackingStreamWrapper::$statCalls = 0;
+        $this->assertTrue(stream_wrapper_register('filesystem-test', StatTrackingStreamWrapper::class));
+
+        try {
+            $this->expectException(PathSecurityException::class);
+            $this->createFilesystem()->move('filesystem-test://external/directory', 'moved');
+        } finally {
+            stream_wrapper_unregister('filesystem-test');
+            $this->assertSame(0, StatTrackingStreamWrapper::$statCalls);
+        }
+    }
+
+    public function testRelativeBaseRemainsAnchoredWhenMoveChangesWorkingDirectory()
+    {
+        $outsidePath = $this->tempPath.'-outside';
+        $workingPath = $this->tempPath.'/nested/runtime';
+        $originalWorkingDirectory = getcwd();
+
+        $this->symfonyFilesystem->mkdir([$workingPath, $outsidePath]);
+
+        try {
+            chdir($workingPath);
+
+            $filesystem = new Filesystem($this->symfonyFilesystem, '../..');
+            $outsideFile = $outsidePath.'/escaped.txt';
+            $assertOutsideMoveIsBlocked = function () use ($filesystem, $outsideFile): void {
+                try {
+                    $filesystem->move($this->tempPath.'/sample.txt', $outsideFile);
+                    $this->fail('Moving a file outside the base path should not be possible.');
+                } catch (PathSecurityException $e) {
+                    $this->assertStringContainsString('outside the allowed base path', $e->getMessage());
+                }
+            };
+
+            $assertOutsideMoveIsBlocked();
+            $filesystem->move($workingPath, $this->tempPath.'/runtime');
+            $assertOutsideMoveIsBlocked();
+
+            $this->assertFileExists($this->tempPath.'/sample.txt');
+            $this->assertFileDoesNotExist($outsideFile);
+        } finally {
+            if (false !== $originalWorkingDirectory) {
+                chdir($originalWorkingDirectory);
+            }
+
+            $this->symfonyFilesystem->remove($outsidePath);
+        }
+    }
+
+    public function testDelete()
+    {
+        $filesystem = $this->createFilesystem(allowDelete: true);
+        $result = $filesystem->delete('sample.txt');
+
+        $this->assertStringContainsString('Successfully deleted', $result);
+        $this->assertFileDoesNotExist($this->tempPath.'/sample.txt');
+    }
+
+    public function testDeleteDirectory()
+    {
+        $filesystem = $this->createFilesystem(allowDelete: true);
+        $result = $filesystem->delete('nested');
+
+        $this->assertStringContainsString('Successfully deleted', $result);
+        $this->assertDirectoryDoesNotExist($this->tempPath.'/nested');
+    }
+
+    public function testDeleteThrowsWhenNotAllowed()
+    {
+        $filesystem = $this->createFilesystem(allowDelete: false);
+
+        $this->expectException(OperationNotPermittedException::class);
+        $this->expectExceptionMessage('Delete operations are not permitted');
+
+        $filesystem->delete('sample.txt');
+    }
+
+    public function testDeleteValidatesPathBeforeCheckingItsType()
+    {
+        StatTrackingStreamWrapper::$statCalls = 0;
+        $this->assertTrue(stream_wrapper_register('filesystem-test', StatTrackingStreamWrapper::class));
+
+        try {
+            $this->expectException(PathSecurityException::class);
+            $this->createFilesystem(allowDelete: true)->delete('filesystem-test://external/directory');
+        } finally {
+            stream_wrapper_unregister('filesystem-test');
+            $this->assertSame(0, StatTrackingStreamWrapper::$statCalls);
+        }
+    }
+
+    public function testMkdir()
+    {
+        $filesystem = $this->createFilesystem();
+        $result = $filesystem->mkdir('newdir');
+
+        $this->assertStringContainsString('Successfully created directory', $result);
+        $this->assertDirectoryExists($this->tempPath.'/newdir');
+    }
+
+    public function testMkdirThrowsWhenNotAllowed()
+    {
+        $filesystem = $this->createFilesystem(allowWrite: false);
+
+        $this->expectException(OperationNotPermittedException::class);
+
+        $filesystem->mkdir('newdir');
+    }
+
+    public function testExists()
+    {
+        $filesystem = $this->createFilesystem();
+
+        $result = $filesystem->exists('sample.txt');
+        $this->assertTrue($result['exists']);
+        $this->assertSame('file', $result['type']);
+
+        $result = $filesystem->exists('nested');
+        $this->assertTrue($result['exists']);
+        $this->assertSame('directory', $result['type']);
+
+        $result = $filesystem->exists('nonexistent.txt');
+        $this->assertFalse($result['exists']);
+        $this->assertNull($result['type']);
+    }
+
+    public function testInfo()
+    {
+        $filesystem = $this->createFilesystem();
+        $info = $filesystem->info('sample.txt');
+
+        $this->assertSame('sample.txt', $info['path']);
+        $this->assertSame('file', $info['type']);
+        $this->assertGreaterThan(0, $info['size']);
+        $this->assertMatchesRegularExpression('/\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/', $info['modified']);
+        $this->assertMatchesRegularExpression('/\d{4}/', $info['permissions']);
+        $this->assertTrue($info['readable']);
+    }
+
+    public function testInfoDirectory()
+    {
+        $filesystem = $this->createFilesystem();
+        $info = $filesystem->info('nested');
+
+        $this->assertSame('nested', $info['path']);
+        $this->assertSame('directory', $info['type']);
+        $this->assertSame(0, $info['size']);
+    }
+
+    public function testList()
+    {
+        $filesystem = $this->createFilesystem();
+        $items = $filesystem->list('.');
+
+        $names = array_column($items, 'name');
+        $this->assertContains('sample.txt', $names);
+        $this->assertContains('nested', $names);
+    }
+
+    public function testListRecursive()
+    {
+        $filesystem = $this->createFilesystem();
+        $items = $filesystem->list('.', recursive: true);
+
+        $names = array_column($items, 'name');
+        $this->assertContains('sample.txt', $names);
+        $this->assertContains('nested', $names);
+        $this->assertContains('nested/file.txt', $names);
+    }
+
+    public function testListThrowsOnFile()
+    {
+        $filesystem = $this->createFilesystem();
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('is not a directory');
+
+        $filesystem->list('sample.txt');
+    }
+
+    public function testPathTraversalPrevented()
+    {
+        $filesystem = $this->createFilesystem();
+
+        $this->expectException(PathSecurityException::class);
+
+        $filesystem->read('../../../etc/passwd');
+    }
+
+    public function testDeniedExtensionPrevented()
+    {
+        $this->symfonyFilesystem->dumpFile($this->tempPath.'/script.php', '<?php echo "test";');
+
+        $filesystem = $this->createFilesystem();
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('Extension "php" is not allowed');
+
+        $filesystem->read('script.php');
+    }
+
+    #[DataProvider('provideExecutableFilenames')]
+    public function testWriteDeniesExecutableExtensionsByDefault(string $filename)
+    {
+        $filesystem = $this->createFilesystem();
+
+        try {
+            $filesystem->write($filename, '<?php echo "test";');
+            $this->fail('Expected PathSecurityException was not thrown.');
+        } catch (PathSecurityException $e) {
+            $this->assertStringContainsString('is not allowed', $e->getMessage());
+        }
+
+        $this->assertFileDoesNotExist($this->tempPath.'/'.$filename);
+    }
+
+    /**
+     * @return iterable<string, array{string}>
+     */
+    public static function provideExecutableFilenames(): iterable
+    {
+        foreach (['php', 'php3', 'php4', 'php5', 'php7', 'php8', 'phps', 'pht', 'phtml', 'phar', 'sh', 'exe', 'bat'] as $extension) {
+            yield $extension => ['shell.'.$extension];
+        }
+
+        yield 'uppercase' => ['shell.PHTML'];
+    }
+
+    public function testMoveDeniesRenamingToExecutableExtension()
+    {
+        $filesystem = $this->createFilesystem();
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('Extension "phtml" is not allowed');
+
+        $filesystem->move('sample.txt', 'shell.phtml');
+    }
+
+    public function testDeniedExtensionPreventsMovingDirectoryContainingDeniedFiles()
+    {
+        $this->symfonyFilesystem->dumpFile($this->tempPath.'/private/shell.php', '<?php echo "test";');
+
+        $filesystem = $this->createFilesystem();
+
+        try {
+            $filesystem->move('private', 'public');
+            $this->fail('Expected PathSecurityException was not thrown.');
+        } catch (PathSecurityException $e) {
+            $this->assertSame('Extension "php" is not allowed.', $e->getMessage());
+        }
+
+        $this->assertFileExists($this->tempPath.'/private/shell.php');
+        $this->assertDirectoryDoesNotExist($this->tempPath.'/public');
+    }
+
+    public function testDeniedExtensionPreventsDeletingDirectoryContainingDeniedFiles()
+    {
+        $this->symfonyFilesystem->dumpFile($this->tempPath.'/project/index.php', '<?php echo "test";');
+
+        $filesystem = $this->createFilesystem(allowDelete: true);
+
+        try {
+            $filesystem->delete('project');
+            $this->fail('Expected PathSecurityException was not thrown.');
+        } catch (PathSecurityException $e) {
+            $this->assertSame('Extension "php" is not allowed.', $e->getMessage());
+        }
+
+        $this->assertFileExists($this->tempPath.'/project/index.php');
+    }
+
+    public function testDeniedPatternPrevented()
+    {
+        $this->symfonyFilesystem->dumpFile($this->tempPath.'/.hidden', 'secret');
+
+        $filesystem = $this->createFilesystem();
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('matches denied pattern');
+
+        $filesystem->read('.hidden');
+    }
+
+    public function testDeniedPatternPreventsReadInsideHiddenDirectory()
+    {
+        $this->symfonyFilesystem->dumpFile($this->tempPath.'/.git/config', 'secret');
+
+        $filesystem = $this->createFilesystem();
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('Path ".git/config" matches denied pattern ".*"');
+
+        $filesystem->read('.git/config');
+    }
+
+    public function testDeniedPatternPreventsWriteBelowDeniedDirectory()
+    {
+        $this->symfonyFilesystem->mkdir($this->tempPath.'/.git/hooks');
+
+        $filesystem = $this->createFilesystem(deniedPatterns: ['.git/*']);
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('Path ".git/hooks/pre-commit" matches denied pattern ".git/*"');
+
+        $filesystem->write('.git/hooks/pre-commit', 'malicious');
+    }
+
+    public function testDeniedPatternPreventsMovingDirectoryContainingDeniedPaths()
+    {
+        $filesystem = $this->createFilesystem(deniedPatterns: ['nested/*']);
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('Path "nested/file.txt" matches denied pattern "nested/*"');
+
+        $filesystem->move('nested', 'other');
+    }
+
+    public function testDeniedPatternPreventsMovingDirectoryIntoDeniedPaths()
+    {
+        $filesystem = $this->createFilesystem(deniedPatterns: ['hooks/*']);
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('Path "hooks/file.txt" matches denied pattern "hooks/*"');
+
+        $filesystem->move('nested', 'hooks');
+    }
+
+    public function testDeniedPatternPreventsMovingOntoDirectoryContainingDeniedPaths()
+    {
+        $this->symfonyFilesystem->dumpFile($this->tempPath.'/other/.env', 'SECRET=1');
+
+        $filesystem = $this->createFilesystem();
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('Path "other/.env" matches denied pattern ".*"');
+
+        $filesystem->move('nested', 'other');
+    }
+
+    public function testDeniedPatternPreventsDeletingDirectoryContainingDeniedPaths()
+    {
+        $filesystem = $this->createFilesystem(allowDelete: true, deniedPatterns: ['nested/*']);
+
+        $this->expectException(PathSecurityException::class);
+        $this->expectExceptionMessage('Path "nested/file.txt" matches denied pattern "nested/*"');
+
+        $filesystem->delete('nested');
+    }
+
+    public function testDeniedPatternPreventsDeletingDirectoryContainingHiddenPaths()
+    {
+        $this->symfonyFilesystem->dumpFile($this->tempPath.'/project/.git/config', 'secret');
+
+        $filesystem = $this->createFilesystem(allowDelete: true);
+
+        try {
+            $filesystem->delete('project');
+            $this->fail('Expected PathSecurityException was not thrown.');
+        } catch (PathSecurityException $e) {
+            $this->assertStringContainsString('matches denied pattern ".*"', $e->getMessage());
+        }
+
+        $this->assertFileExists($this->tempPath.'/project/.git/config');
+    }
+
+    public function testDeniedPathPatternDoesNotAffectUnrelatedPaths()
+    {
+        $filesystem = $this->createFilesystem(deniedPatterns: ['nested/*']);
+
+        $this->assertNotEmpty($filesystem->list('.'));
+        $this->assertStringContainsString('Successfully moved', $filesystem->move('sample.txt', 'moved.txt'));
+    }
+
+    public function testModelIsToldThatThePathDoesNotExist()
+    {
+        $result = $this->executeToolCall('filesystem_read', ['path' => 'does-not-exist.txt']);
+
+        $this->assertSame('Path "does-not-exist.txt" does not exist.', $result);
+    }
+
+    public function testModelIsToldThatWriteOperationsAreNotPermitted()
+    {
+        $result = $this->executeToolCall('filesystem_write', ['path' => 'new.txt', 'content' => 'content'], $this->createFilesystem(allowWrite: false));
+
+        $this->assertSame('Write operations are not permitted.', $result);
+    }
+
+    public function testModelIsNotToldTheServerPathOutsideTheBasePath()
+    {
+        $outsidePath = sys_get_temp_dir().'/filesystem_outside_'.uniqid();
+        $this->symfonyFilesystem->dumpFile($outsidePath.'/secret.txt', 'secret');
+        $this->symfonyFilesystem->symlink($outsidePath.'/secret.txt', $this->tempPath.'/link.txt');
+
+        try {
+            $result = $this->executeToolCall('filesystem_read', ['path' => 'link.txt']);
+        } finally {
+            $this->symfonyFilesystem->remove($outsidePath);
+        }
+
+        $this->assertSame('Path "link.txt" is outside the allowed base path.', $result);
+    }
+
+    public function testModelIsNotToldTheServerPathOfAMissingBasePath()
+    {
+        $filesystem = new Filesystem($this->symfonyFilesystem, $this->tempPath.'/missing');
+
+        $result = $this->executeToolCall('filesystem_read', ['path' => $this->tempPath.'/sample.txt'], $filesystem);
+
+        $this->assertSame('The base path of the filesystem does not exist.', $result);
+    }
+
+    /**
+     * @param array<string, mixed> $arguments
+     */
+    private function executeToolCall(string $name, array $arguments, ?Filesystem $filesystem = null): mixed
+    {
+        $toolbox = new FaultTolerantToolbox(new Toolbox([$filesystem ?? $this->createFilesystem()]));
+
+        return $toolbox->execute(new ToolCall('call', $name, $arguments))->getResult();
+    }
+
+    /**
+     * @param list<string> $deniedPatterns
+     */
+    private function createFilesystem(
+        bool $allowWrite = true,
+        bool $allowDelete = false,
+        int $maxReadSize = 10485760,
+        array $deniedPatterns = ['.*', '*.env*'],
+    ): Filesystem {
+        return new Filesystem(
+            $this->symfonyFilesystem,
+            $this->tempPath,
+            $allowWrite,
+            $allowDelete,
+            deniedPatterns: $deniedPatterns,
+            maxReadSize: $maxReadSize,
+        );
+    }
+}
